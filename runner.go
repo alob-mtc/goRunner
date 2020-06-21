@@ -34,6 +34,9 @@ type Runner struct {
 
 	// terminate controlles the termination of workers
 	terminate bool
+
+	// number of worker to spin up
+	numberOfWorker int
 }
 
 // ErrTimeout is returned when a value is received on the timeout channel.
@@ -43,12 +46,13 @@ var ErrTimeout = errors.New("received timeout")
 var ErrInterrupt = errors.New("received interrupt")
 
 // New returns a new ready-to-use Runner.
-func New(d time.Duration) *Runner {
+func New(d time.Duration, numberOfWorker int) *Runner {
 	return &Runner{
-		interrupt:    make(chan os.Signal, 1),
-		complete:     make(chan error),
-		timeout:      time.After(d),
-		completeMain: make(chan error),
+		interrupt:      make(chan os.Signal, 1),
+		complete:       make(chan error),
+		timeout:        time.After(d),
+		completeMain:   make(chan error),
+		numberOfWorker: numberOfWorker,
 	}
 }
 
@@ -71,7 +75,7 @@ func (r *Runner) Start() error {
 		completedTask := 0
 		for range r.complete {
 			completedTask++
-			if completedTask == len(r.tasks) {
+			if completedTask == r.numberOfWorker {
 				close(r.complete)
 				r.completeMain <- nil
 				return
@@ -92,7 +96,7 @@ func (r *Runner) Start() error {
 
 // run executes each registered task.
 func (r *Runner) run() error {
-	for id := 0; id < 3; id++ {
+	for id := 0; id < r.numberOfWorker; id++ {
 		// spin up the worker GORs to Execute the registered task.
 		go func(i int) {
 			//get the task
@@ -106,7 +110,6 @@ func (r *Runner) run() error {
 				// run the task
 				task(i)
 				task, ok = r.getTask()
-
 			}
 			r.complete <- nil
 		}(id)
