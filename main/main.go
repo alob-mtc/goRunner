@@ -12,7 +12,7 @@ import (
 )
 
 // timeout is the number of second the program has to finish.
-const timeout = 3 * time.Second
+const timeout = 2 * time.Second
 
 // main is the entry point for the program.
 func main() {

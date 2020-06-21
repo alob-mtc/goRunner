@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"os/signal"
+	"sync"
 	"time"
 )
 
@@ -18,12 +19,21 @@ type Runner struct {
 	// complete channel reports that processing is done.
 	complete chan error
 
+	// complete channel reports that processing is done.
+	completeMain chan error
+
 	// timeout reports that time has run out.
 	timeout <-chan time.Time
 
 	// tasks holds a set of functions that are executed
 	// synchronously in index order.
 	tasks []func(int)
+
+	//mutex
+	m sync.Mutex
+
+	// terminate controlles the termination of workers
+	terminate bool
 }
 
 // ErrTimeout is returned when a value is received on the timeout channel.
@@ -35,9 +45,10 @@ var ErrInterrupt = errors.New("received interrupt")
 // New returns a new ready-to-use Runner.
 func New(d time.Duration) *Runner {
 	return &Runner{
-		interrupt: make(chan os.Signal, 1),
-		complete:  make(chan error),
-		timeout:   time.After(d),
+		interrupt:    make(chan os.Signal, 1),
+		complete:     make(chan error),
+		timeout:      time.After(d),
+		completeMain: make(chan error),
 	}
 }
 
@@ -53,13 +64,24 @@ func (r *Runner) Start() error {
 	signal.Notify(r.interrupt, os.Interrupt)
 
 	// Run the different tasks on a different goroutine.
+	r.run()
+	// spin up the master GOR
 	go func() {
-		r.complete <- r.run()
+		// check if all the task as been precessed
+		completedTask := 0
+		for range r.complete {
+			completedTask++
+			if completedTask == len(r.tasks) {
+				close(r.complete)
+				r.completeMain <- nil
+				return
+			}
+		}
 	}()
-
 	select {
 	// Signaled when processing is done.
-	case err := <-r.complete:
+	case err := <-r.completeMain:
+		// id the err is ErrInterrupt => tell all the running workers to terminate
 		return err
 
 	// Signaled when we run out of time.
@@ -70,14 +92,24 @@ func (r *Runner) Start() error {
 
 // run executes each registered task.
 func (r *Runner) run() error {
-	for id, task := range r.tasks {
-		// Check for an interrupt signal from the OS.
-		if r.gotInterrupt() {
-			return ErrInterrupt
-		}
+	for id := 0; id < 3; id++ {
+		// spin up the worker GORs to Execute the registered task.
+		go func(i int) {
+			//get the task
+			task, ok := r.getTask()
+			for ok {
+				// Check for an interrupt signal from the OS.
+				if r.gotInterrupt() {
+					r.completeMain <- ErrInterrupt
+					return
+				}
+				// run the task
+				task(i)
+				task, ok = r.getTask()
 
-		// Execute the registered task.
-		task(id)
+			}
+			r.complete <- nil
+		}(id)
 	}
 
 	return nil
@@ -88,12 +120,37 @@ func (r *Runner) gotInterrupt() bool {
 	select {
 	// Signaled when an interrupt event is sent.
 	case <-r.interrupt:
+		r.terminate = true
 		// Stop receiving any further signals.
 		signal.Stop(r.interrupt)
 		return true
 
-	// Continue running as normal.
+		// Continue running as normal.
 	default:
+		// check if ternimate
+		if r.terminate {
+			return true
+		}
 		return false
 	}
+}
+
+// getTask
+func (r *Runner) getTask() (task func(int), found bool) {
+	// secure this operation with lock
+	r.m.Lock()
+	defer r.m.Unlock()
+	//TODO: fetch the task form the task queue
+	for i, value := range r.tasks {
+		if value == nil {
+			continue
+		} else {
+			task = value
+			found = true
+			// set the index to nil
+			r.tasks[i] = nil
+			break
+		}
+	}
+	return
 }
